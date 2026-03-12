@@ -3,8 +3,13 @@ import redis.asyncio as aioredis
 import asyncio
 import json
 import asyncpg
+import os
 
 app = FastAPI()
+
+# config from environment
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/notify")
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 
 # store active websocket connections and listener tasks
 connected_users = {}
@@ -13,13 +18,11 @@ listener_tasks = {}
 
 @app.on_event("startup")
 async def startup():
-    app.state.db = await asyncpg.create_pool(
-        "postgresql://postgres:postgres@localhost:5432/notify"
-    )
+    app.state.db = await asyncpg.create_pool(DATABASE_URL)
 
 
 async def redis_listener(websocket: WebSocket, db):
-    r = aioredis.Redis(host="localhost", port=6379)
+    r = aioredis.Redis(host=REDIS_HOST, port=6379)
     pubsub = r.pubsub()
     await pubsub.subscribe("notifications")
 

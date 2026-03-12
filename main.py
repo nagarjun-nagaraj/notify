@@ -2,14 +2,23 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import redis.asyncio as aioredis
 import asyncio
 import json
+import asyncpg
 
 app = FastAPI()
 
 # store active websocket connections
 connected_users = {}
 
-async def redis_listener(websocket: WebSocket):
-    r = aioredis.Redis(host='localhost', port=6379)
+
+@app.on_event("startup")
+async def startup():
+    app.state.db = await asyncpg.create_pool(
+        "postgresql://postgres:postgres@localhost:5432/notify"
+    )
+
+
+async def redis_listener(websocket: WebSocket, db):
+    r = aioredis.Redis(host="localhost", port=6379)
     pubsub = r.pubsub()
     await pubsub.subscribe("notifications")
 
@@ -23,7 +32,14 @@ async def redis_listener(websocket: WebSocket):
             user_id = payload["user_id"]
             text = payload["message"]
 
-            # Send only to the correct user
+            # Save notification to database
+            await db.execute(
+                "INSERT INTO notifications (user_id, message) VALUES ($1, $2)",
+                user_id,
+                text
+            )
+
+            # Send only to the intended user
             if user_id in connected_users:
                 user_ws = connected_users[user_id]
                 await user_ws.send_text(text)
@@ -39,7 +55,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
     print(f"user {user_id} connected")
 
     # run redis listener in background
-    asyncio.create_task(redis_listener(websocket))
+    asyncio.create_task(redis_listener(websocket, app.state.db))
 
     try:
         while True:
@@ -47,6 +63,15 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
             await websocket.send_text(f"echo: {message}")
 
     except WebSocketDisconnect:
-        # remove user on disconnect
         connected_users.pop(user_id, None)
         print(f"user {user_id} disconnected")
+
+
+@app.get("/notifications/{user_id}")
+async def get_notifications(user_id: int):
+    rows = await app.state.db.fetch(
+        "SELECT id, user_id, message, created_at FROM notifications WHERE user_id=$1 ORDER BY created_at DESC",
+        user_id
+    )
+
+    return [dict(row) for row in rows]

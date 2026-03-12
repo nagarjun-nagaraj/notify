@@ -6,8 +6,9 @@ import asyncpg
 
 app = FastAPI()
 
-# store active websocket connections
+# store active websocket connections and listener tasks
 connected_users = {}
+listener_tasks = {}
 
 
 @app.on_event("startup")
@@ -25,21 +26,17 @@ async def redis_listener(websocket: WebSocket, db):
     async for message in pubsub.listen():
         if message["type"] == "message":
             data = message["data"].decode("utf-8")
-
-            # Parse JSON
             payload = json.loads(data)
-
             user_id = payload["user_id"]
             text = payload["message"]
 
-            # Save notification to database
+            # Save to database
             await db.execute(
                 "INSERT INTO notifications (user_id, message) VALUES ($1, $2)",
-                user_id,
-                text
+                user_id, text
             )
 
-            # Send only to the intended user
+            # Push to user if online
             if user_id in connected_users:
                 user_ws = connected_users[user_id]
                 await user_ws.send_text(text)
@@ -54,16 +51,23 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
     connected_users[user_id] = websocket
     print(f"user {user_id} connected")
 
-    # run redis listener in background
-    asyncio.create_task(redis_listener(websocket, app.state.db))
+    # cancel old listener task if exists
+    if user_id in listener_tasks:
+        listener_tasks[user_id].cancel()
+
+    # create new listener task and track it
+    task = asyncio.create_task(redis_listener(websocket, app.state.db))
+    listener_tasks[user_id] = task
 
     try:
         while True:
             message = await websocket.receive_text()
             await websocket.send_text(f"echo: {message}")
-
     except WebSocketDisconnect:
         connected_users.pop(user_id, None)
+        if user_id in listener_tasks:
+            listener_tasks[user_id].cancel()
+            listener_tasks.pop(user_id, None)
         print(f"user {user_id} disconnected")
 
 
@@ -73,5 +77,4 @@ async def get_notifications(user_id: int):
         "SELECT id, user_id, message, created_at FROM notifications WHERE user_id=$1 ORDER BY created_at DESC",
         user_id
     )
-
     return [dict(row) for row in rows]
